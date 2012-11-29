@@ -1,0 +1,110 @@
+#!/usr/bin/perl
+
+####################################################################
+#
+# check_solr_repl - a Nagios Plugin to monitor solr replication
+#
+# requires LWP::Simple and Getopt::Std 
+#
+####################################################################
+
+our ($line,$opt_u,$opt_d,$opt_h,$opt_p,$opt_w,$opt_c);
+our ($host,@page,$port,$warn,$crit,$datetime,$status,$master,$lag,$lastrep,$is_master,$is_slave,$url);
+use Getopt::Std;
+use Time::Interval;
+#use DateTime;
+use LWP::Simple;
+
+getopts('duh:p:w:c:');
+$host="localhost";
+$url="solr/admin/replication/index.jsp";
+$port="8983";
+$warn="30";
+$crit="60";
+if ($opt_d) { $debug="true"; }
+if ($opt_u) { &usage; }
+if ($opt_h) { $host="$opt_h"; }
+if ($opt_p) { $port="$opt_p"; }
+if ($opt_w) { $warn="$opt_w"; }
+if ($opt_c) { $crit="$opt_c"; }
+
+$crit<=$warn && die "UNKNOWN: crit $crit is not greater than warn $warn.$!\n";
+# first, check to see if we can open a connection to the given port
+&timestamp;
+&checkpage;
+# parse the output
+&parseout;
+
+if ($status) { print "$status\n"; } else { print "UNKNOWN: $!\n"; }
+exit 0;
+
+sub timestamp {
+  $datetime=`date +%Y-%m-%dT%H:%M:%S`;
+  chomp $datetime;
+}
+
+# here's where we manipulate timestamps to see how far behind we are
+sub checkrep {
+  my $reptime;
+  if ($lastrep) {
+    # the kabuki dance to get the date into a useable format.
+    my ($dow,$mon,$dom,$time,$tz,$year)=split(" ",$lastrep);
+    my %months = (Jan =>1, Feb=>2, Mar=>3, Apr=>4, May=>5, Jun=>6, Jul=>7, Aug=>8, Sep=>9, Oct=>10, Nov=>11, Dec=>12);
+    my ($hour,$min,$sec) = split(":","$time");
+    $reptime="$year-$months{$mon}-$dom"."T$hour:$min:$sec";
+    }
+  $delta = getInterval($datetime,$reptime);
+  $tmp = getInterval($datetime,$reptime,string); 
+  $lag = convertInterval( 'days' => $$delta{'days'},
+                          'hours' => $$delta{'hours'},
+                          'minutes' => $$delta{'minutes'},
+                          'seconds' => $$delta{'seconds'},
+                          ConvertTo => "seconds" ) ;
+  $debug && print "last replication $tmp ago\n";
+  if ($lag >= $crit) { $status = "CRIT: $tmp behind $master" }
+   elsif ($lag >= $warn) { $status = "WARN: $tmp behind $master" } 
+   elsif ( $lag < $warn && $lag >= 0 ) { $status = "OK: $tmp behind $master" }
+   else { $status = "UNKNOWN: $tmp ?" } 
+}
+
+sub parseout {
+my @tmp;
+foreach $line (@page) { 
+  chomp;
+  $line =~ s/^\s*//; # eliminate leading spaces
+  $line =~ s|<.+?>||g; # eliminate all html tags
+  if ($line =~ /^Solr replication / ) { next; }
+  if ($line =~ /is replicating/ig ) { $status = "OK: Replicating"; return;}
+  if ($line =~ /Previous Replication Done At\: /i ) { 
+    $lastrep = "$line" ;$lastrep =~ s/^.*Previous Replication Done At:\s*//i; $status="Replicated" 
+    }
+  if ($line =~ /^\(What is this page\?\)/ig ) { next; }
+  if ($line =~ /^http.*solr\/replication/ ) { $master= $line; $master =~ s|http://||; $master =~ s/\/solr\/replication//; }
+  if ($line =~ /^$/) { next; }
+  $debug && print "$line\n";
+  push @tmp,$line;
+  if ($tmp[1] eq "Master" ) { $is_master="true"; }
+  if ($tmp[1] eq "Slave" ) { $is_slave="true"; }
+ }
+
+  if ($is_master eq "true" ) { $status = "OK: $host is a master.";} # nothing to compare the master against! 
+  elsif ($is_slave eq "true" ) { $debug && print "$host is a slave.\n"; &checkrep; }
+}
+
+# grab the target replication page
+sub checkpage {
+  my $page = get ("http://$host:$port/$url") || die "CRITICAL: could not fetch $host:$port/$url: $!\n";
+  @page = split("\012",$page); # split on linebreaks
+}
+
+# usage message
+sub usage { 
+  print "$0 (-du) (-h <hostname>) (-p <port>) -w <warn seconds> -c <crit seconds>\n";
+  print "  This script is meant to check replication status of solr instances.\n";
+  print "\t -d            : enable debugging\n";
+  print "\t -u            : this message\n";
+  print "\t -h <hostname> : monitor solr on target host (default $host)\n";
+  print "\t -p <port>     : monitor solr on this port (default $port)\n";
+  print "\t -w <number>   : warn if solr slave falls behind <number> seconds (default $warn)\n";
+  print "\t -c <number>   : crit if solr slave falls behind <number> seconds (default $crit)\n";
+} 
