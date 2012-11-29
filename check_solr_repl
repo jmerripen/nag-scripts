@@ -10,6 +10,7 @@
 
 our ($line,$opt_u,$opt_d,$opt_h,$opt_p,$opt_w,$opt_c);
 our ($host,@page,$port,$warn,$crit,$datetime,$status,$master,$lag,$lastrep,$is_master,$is_slave,$url);
+our ($masterind,$slaveind,$mastergen,$slavegen);
 use Getopt::Std;
 use Time::Interval;
 #use DateTime;
@@ -35,7 +36,7 @@ $crit<=$warn && die "UNKNOWN: crit $crit is not greater than warn $warn.$!\n";
 # parse the output
 &parseout;
 
-if ($status) { print "$status\n"; } else { print "UNKNOWN: $!\n"; }
+if ($status) { print "$status i$masterind\g$mastergen $host: i$slaveind\g$slavegen"; } else { print "UNKNOWN: $!"; }
 exit 0;
 
 sub timestamp {
@@ -43,8 +44,16 @@ sub timestamp {
   chomp $datetime;
 }
 
-# here's where we manipulate timestamps to see how far behind we are
+# here's where we see how far behind we are
 sub checkrep {
+  $mastergen =~ s/[^\d]//gi; # I feel like a number!!
+  $masterind =~ s/[^\d]//gi;
+  $slavegen =~ s/[^\d]//gi; # I feel like a number!!
+  $slaveind =~ s/[^\d]//gi;
+  $debug && print "Master Index : $masterind Generation: $mastergen\n";
+  $debug && print "Slave Index : $slaveind Generation: $slavegen\n";
+  # all is right with the world, the master and slave are in sync
+  if ($masterind eq $slaveind and $mastergen eq $slavegen) { $status = "OK : $master and $host:$port are in sync"; return; } 
   my $reptime;
   if ($lastrep) {
     # the kabuki dance to get the date into a useable format.
@@ -60,7 +69,11 @@ sub checkrep {
                           'minutes' => $$delta{'minutes'},
                           'seconds' => $$delta{'seconds'},
                           ConvertTo => "seconds" ) ;
-  $debug && print "last replication $tmp ago\n";
+  $debug && print "Last replication $tmp ago\n";
+  #my $slew;
+  #my $gslew;
+  #{ $slew = $masterind-$slaveind ; }
+  #if ($mastergen != $slavegen) { $gslew =  $mastergen-$slavegen ; }
   if ($lag >= $crit) { $status = "CRIT: $tmp behind $master" }
    elsif ($lag >= $warn) { $status = "WARN: $tmp behind $master" } 
    elsif ( $lag < $warn && $lag >= 0 ) { $status = "OK: $tmp behind $master" }
@@ -75,6 +88,8 @@ foreach $line (@page) {
   $line =~ s|<.+?>||g; # eliminate all html tags
   if ($line =~ /^Solr replication / ) { next; }
   if ($line =~ /is replicating/ig ) { $status = "OK: Replicating"; return;}
+  if ($line =~ /^Replicatable Index Version/ig) { ($masterind,$mastergen) = split(",",$line) }
+  if ($line =~ /^Index Version/ig) { ($slaveind,$slavegen) = split (",",$line) }
   if ($line =~ /Previous Replication Done At\: /i ) { 
     $lastrep = "$line" ;$lastrep =~ s/^.*Previous Replication Done At:\s*//i; $status="Replicated" 
     }
@@ -83,7 +98,7 @@ foreach $line (@page) {
   if ($line =~ /^$/) { next; }
   $debug && print "$line\n";
   push @tmp,$line;
-  if ($tmp[1] eq "Master" ) { $is_master="true"; }
+  if ($tmp[1] eq "Master" || $tmp[1] eq "Master & Slave" ) { $is_master="true"; }
   if ($tmp[1] eq "Slave" ) { $is_slave="true"; }
  }
 
